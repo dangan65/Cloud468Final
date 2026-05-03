@@ -1,0 +1,109 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # FastAPI URL Shortener
+  # ---------------------------------------------------------------------------
+  api:
+    # In CI/CD the runner sets DOCKER_IMAGE to the registry tag; locally we
+    # fall back to building from source.
+    image: ${DOCKER_IMAGE:-url-shortener:local}
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+    # --- Defense in Depth (Lecture 12) ---
+
+    # Run as the same non-root UID created inside the Dockerfile
+    user: "1001:1001"
+
+    # Drop every Linux capability, then add back only what is strictly needed.
+    # CAP_NET_BIND_SERVICE allows binding to ports < 1024; not needed here
+    # (we use port 8000) but shown for reference. All other caps are dropped.
+    cap_drop:
+      - ALL
+
+    # Read-only root filesystem prevents an attacker from writing malware to
+    # the container's filesystem. We allow a tmpfs /tmp for any temp files.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+    # Prevent privilege escalation via setuid/setgid binaries
+    security_opt:
+      - no-new-privileges:true
+
+    # Resource limits — demonstrates cgroup v2 understanding.
+    # The API is lightweight; 0.5 CPU and 256 MB is generous headroom.
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+        reservations:
+          cpus: "0.10"
+          memory: 64M
+
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Redis — key-value store for URL mappings
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    # redis:7-alpine ships with a 'redis' user at UID 999
+    user: "999:999"
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 32M
+
+    volumes:
+      - redis-data:/data
+
+    networks:
+      - app-network
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+    restart: unless-stopped
+
+# ---------------------------------------------------------------------------
+# Networking — isolated bridge network; containers address each other by
+# service name (Docker's embedded DNS resolver handles it).
+# ---------------------------------------------------------------------------
+networks:
+  app-network:
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Volumes — named volume persists Redis data across container restarts
+# ---------------------------------------------------------------------------
+volumes:
+  redis-data:
+    driver: local
